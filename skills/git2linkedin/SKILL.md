@@ -1,13 +1,13 @@
 ---
 name: git2linkedin
-description: Generate English LinkedIn Experience drafts from a repository's git history. Use when asked to write or improve LinkedIn experience text from real commit activity, either for all-time history or a specific date range (`since`/`until` in YYYY-MM-DD), with mandatory role and company context.
+description: Generate feature-based and confidentiality-safe English LinkedIn Experience drafts directly from commit messages. Use when asked to write LinkedIn experience text from real commit activity for all-time or a specific date range (`since`/`until` in YYYY-MM-DD), while avoiding repository statistics and internal/confidential implementation details.
 ---
 
 # Git2LinkedIn
 
 ## Overview
 
-Generate a LinkedIn Experience draft from git history with a role-aware summary and impact bullets.
+Generate a LinkedIn Experience draft from git history by directly reading commit messages and converting them into feature-focused, business-relevant, and confidentiality-safe bullets.
 
 ## Workflow
 
@@ -42,7 +42,8 @@ python3 skills/git2linkedin/scripts/git_history_extract.py \
 4. Convert JSON output into final LinkedIn text:
 - Write one short English summary sentence.
 - Write 4-6 impact bullets.
-- Prefer measurable impact from `stats`, `areas`, and `tech_signals`.
+- Focus on end-user value and business relevance.
+- Avoid repository metrics, commit hashes, file paths, and internal identifiers.
 
 5. Handle empty ranges explicitly:
 - If commit list is empty, explain that no commits were found and suggest widening the date range or changing `author`.
@@ -51,14 +52,17 @@ python3 skills/git2linkedin/scripts/git_history_extract.py \
 
 Use these JSON fields:
 - `summary`: baseline sentence for LinkedIn experience
-- `highlights`: impact-oriented bullet candidates
-- `stats`: commit/file/churn metrics
-- `areas`: top changed project areas
-- `tech_signals`: top technology signals
+- `feature_highlights`: feature-oriented bullet candidates
+- `end_user_outcomes`: user-facing outcomes
+- `business_relevance`: why this work matters for role/business goals
+- `source_mode`: extraction mode metadata (`direct-commit-messages`)
 - `guidance`: fallback suggestion when history is empty
 
 ## Guardrails
 
 - Keep output in English unless user asks otherwise.
 - Keep bullets concise and outcome-focused.
-- Do not invent technologies or impact beyond git evidence.
+- Keep sentence style mostly passive and neutral; avoid first-person phrasing (`I improved`, `I enhanced`, etc.).
+- Do not include repository statistics.
+- Do not expose commit hashes, file paths, issue IDs, URLs, or raw commit messages.
+- Do not invent confidential product details; keep language high-level and safe for public profiles.

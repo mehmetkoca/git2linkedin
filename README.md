@@ -14,12 +14,18 @@ It supports:
 - Author filtering (defaults to current git user)
 - Optional markdown draft export (`--out`)
 
+It is optimized for public LinkedIn writing:
+- Feature-based output (not repository statistics)
+- No commit hashes, file paths, or raw internal commit text in final output
+- Emphasis on end-user value and business relevance
+- Passive, neutral sentence style (no first-person wording)
+- Direct commit-message reading (no theme extraction layer)
+
 ## Project Layout
 
 ```text
 skills/git2linkedin/
   SKILL.md
-  agents/openai.yaml
   scripts/git_history_extract.py
 ```
 
@@ -78,15 +84,18 @@ python3 skills/git2linkedin/scripts/git_history_extract.py \
     "since": "2025-06-01",
     "until": "2025-12-31"
   },
-  "stats": {
-    "raw_commits": 24,
-    "meaningful_commits": 13
-  },
-  "summary": "As Software Engineer at Acme, shipped 13 meaningful commits ...",
-  "highlights": [
-    "Shipped 13 meaningful commits touching 41 files across 5 project areas.",
-    "Worked across a broad stack with visible activity in TypeScript (12), SQL (4)."
-  ]
+  "summary": "In the role of Software Engineer at Acme, commit-message-driven feature highlights were generated ...",
+  "feature_highlights": [
+    "Issue resolution was completed in user onboarding flow.",
+    "Feature delivery was completed in account recovery experience."
+  ],
+  "end_user_outcomes": [
+    "User-facing disruptions were reduced in critical journeys."
+  ],
+  "business_relevance": [
+    "Core business workflows were protected from avoidable service degradation."
+  ],
+  "source_mode": "direct-commit-messages"
 }
 ```
 
@@ -94,6 +103,7 @@ python3 skills/git2linkedin/scripts/git_history_extract.py \
 
 Use:
 - `summary` for your first sentence under the role
-- First 4-6 `highlights` as bullet points
+- First 4-6 `feature_highlights` as bullet points
+- Blend `end_user_outcomes` and `business_relevance` into your final bullet language
 
 Keep the final text concise and impact-focused.

@@ -7,7 +7,6 @@ import json
 import re
 import subprocess
 import sys
-from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,25 +22,72 @@ LOW_SIGNAL_PATTERNS = [
     re.compile(r"^(docs?)(\(|:|\b)", re.IGNORECASE),
 ]
 
-EXTENSION_TO_TECH = {
-    ".py": "Python",
-    ".js": "JavaScript",
-    ".ts": "TypeScript",
-    ".tsx": "React/TypeScript",
-    ".jsx": "React/JavaScript",
-    ".java": "Java",
-    ".kt": "Kotlin",
-    ".go": "Go",
-    ".rs": "Rust",
-    ".rb": "Ruby",
-    ".php": "PHP",
-    ".swift": "Swift",
-    ".sql": "SQL",
-    ".yaml": "YAML",
-    ".yml": "YAML",
-    ".json": "JSON",
-    ".tf": "Terraform",
-    ".dockerfile": "Docker",
+SENSITIVE_PATTERNS = [
+    re.compile(r"https?://\S+", re.IGNORECASE),
+    re.compile(r"\b[A-Z]{2,10}-\d+\b"),
+    re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE),
+    re.compile(r"\b\S+@\S+\b"),
+]
+
+ACTION_VERBS = {
+    "add",
+    "added",
+    "build",
+    "built",
+    "create",
+    "created",
+    "deliver",
+    "delivered",
+    "implement",
+    "implemented",
+    "introduce",
+    "introduced",
+    "improve",
+    "improved",
+    "enhance",
+    "enhanced",
+    "optimize",
+    "optimized",
+    "fix",
+    "fixed",
+    "resolve",
+    "resolved",
+    "repair",
+    "repaired",
+    "refactor",
+    "refactored",
+    "update",
+    "updated",
+    "reduce",
+    "reduced",
+    "increase",
+    "increased",
+}
+
+STOP_WORDS = {
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "for",
+    "to",
+    "of",
+    "in",
+    "on",
+    "with",
+    "by",
+    "from",
+    "at",
+    "into",
+    "across",
+    "over",
+    "flow",
+    "flows",
+    "feature",
+    "features",
+    "issue",
+    "issues",
 }
 
 
@@ -50,16 +96,10 @@ def fail(message: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
-def pluralize(count: int, singular: str, plural: str | None = None) -> str:
-    if count == 1:
-        return singular
-    return plural if plural else f"{singular}s"
-
-
-def run_git(repo_path: str, args: list[str], check: bool = True) -> str:
+def run_git(repo_path: str, args: list[str]) -> str:
     cmd = ["git", "-C", repo_path, *args]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    if check and result.returncode != 0:
+    if result.returncode != 0:
         fail(f"Git command failed: {' '.join(cmd)}\n{result.stderr.strip()}")
     return result.stdout
 
@@ -99,49 +139,15 @@ def detect_current_git_user(repo_path: str) -> str:
     fail("Could not detect current git user. Provide --author explicitly.")
 
 
-def parse_log(raw: str) -> list[dict[str, Any]]:
-    commits: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-
-    for line in raw.splitlines():
-        if line.startswith("__COMMIT__\x1f"):
-            if current is not None:
-                commits.append(current)
-            parts = line.split("\x1f", 4)
-            if len(parts) < 5:
-                continue
-            current = {
-                "hash": parts[1].strip(),
-                "date": parts[2].strip(),
-                "subject": normalize_space(parts[3]),
-                "body": normalize_space(parts[4]),
-                "files": [],
-                "insertions": 0,
-                "deletions": 0,
-            }
-            continue
-
-        if not line.strip() or current is None:
-            continue
-
-        columns = line.split("\t")
-        if len(columns) != 3:
-            continue
-
-        added_raw, deleted_raw, file_path = columns
-        added = int(added_raw) if added_raw.isdigit() else 0
-        deleted = int(deleted_raw) if deleted_raw.isdigit() else 0
-        current["files"].append(file_path.strip())
-        current["insertions"] += added
-        current["deletions"] += deleted
-
-    if current is not None:
-        commits.append(current)
-    return commits
-
-
 def normalize_space(value: str) -> str:
     return " ".join(value.split())
+
+
+def scrub_sensitive_text(value: str) -> str:
+    text = normalize_space(value)
+    for pattern in SENSITIVE_PATTERNS:
+        text = pattern.sub("", text)
+    return normalize_space(text)
 
 
 def is_low_signal_subject(subject: str) -> bool:
@@ -150,109 +156,156 @@ def is_low_signal_subject(subject: str) -> bool:
     return any(pattern.search(subject) for pattern in LOW_SIGNAL_PATTERNS)
 
 
-def infer_area(file_path: str) -> str:
-    normalized = file_path.strip().replace("\\", "/")
-    if not normalized:
-        return "root"
-    if normalized.startswith("{") and "=>" in normalized and "}" in normalized:
-        normalized = normalized.split("}", 1)[-1].lstrip("/")
-    top = normalized.split("/", 1)[0]
-    if top in ("", "."):
-        return "root"
-    return top
+def strip_conventional_prefix(subject: str) -> str:
+    return re.sub(r"^[a-zA-Z]+(?:\([^)]+\))?:\s*", "", subject.strip())
 
 
-def infer_extension(file_path: str) -> str:
-    lowered = file_path.lower()
-    if lowered.endswith("dockerfile"):
-        return ".dockerfile"
-    return Path(lowered).suffix
-
-
-def build_highlights(
-    meaningful_commits: list[dict[str, Any]],
-    unique_files: set[str],
-    area_counts: Counter[str],
-    tech_counts: Counter[str],
-    total_insertions: int,
-    total_deletions: int,
-) -> list[str]:
-    if not meaningful_commits:
-        return []
-
-    highlights: list[str] = []
-    commit_count = len(meaningful_commits)
-    area_count = len(area_counts)
-    commit_word = pluralize(commit_count, "commit")
-    file_word = pluralize(len(unique_files), "file")
-    area_word = pluralize(area_count, "area")
-    highlights.append(
-        f"Shipped {commit_count} meaningful {commit_word} touching {len(unique_files)} {file_word} across {area_count} project {area_word}."
+def parse_log(raw: str) -> list[dict[str, str]]:
+    matches = re.finditer(
+        r"__COMMIT__\x1f([^\x1f]*)\x1f([^\x1f]*)\x1f(.*?)(?=\n__COMMIT__\x1f|\Z)",
+        raw,
+        re.DOTALL,
     )
+    commits: list[dict[str, str]] = []
+    for match in matches:
+        date = match.group(1).strip()
+        subject = scrub_sensitive_text(match.group(2))
+        body = scrub_sensitive_text(match.group(3))
+        commits.append({"date": date, "subject": subject, "body": body})
+    return commits
 
-    if total_insertions > 0 or total_deletions > 0:
-        insertion_word = pluralize(total_insertions, "insertion")
-        deletion_word = pluralize(total_deletions, "deletion")
-        highlights.append(
-            f"Drove substantial code evolution with about {total_insertions} {insertion_word} and {total_deletions} {deletion_word}."
-        )
 
-    if area_counts:
-        top_area, top_area_changes = area_counts.most_common(1)[0]
-        change_word = pluralize(top_area_changes, "change")
-        highlights.append(
-            f"Focused strongly on {top_area}, contributing {top_area_changes} file-level {change_word} in that area."
-        )
+def classify_action(subject: str) -> str:
+    lowered = subject.lower()
+    if any(word in lowered for word in ("fix", "resolve", "repair", "bug", "hotfix")):
+        return "issue-resolution"
+    if any(word in lowered for word in ("optimiz", "perf", "latency", "speed", "cache")):
+        return "performance"
+    if any(word in lowered for word in ("secure", "security", "privacy", "permission", "access")):
+        return "security"
+    if any(word in lowered for word in ("integrat", "api", "webhook", "sync", "export", "import")):
+        return "integration"
+    if any(word in lowered for word in ("refactor", "cleanup", "simplify", "maintain")):
+        return "maintainability"
+    return "feature-delivery"
 
-    if tech_counts:
-        top_techs = [f"{tech} ({count})" for tech, count in tech_counts.most_common(3)]
-        highlights.append(
-            f"Worked across a broad stack with visible activity in {', '.join(top_techs)}."
-        )
 
-    recent_subjects = []
-    for commit in meaningful_commits:
-        subject = commit["subject"].strip()
-        if subject and subject not in recent_subjects:
-            recent_subjects.append(subject)
-        if len(recent_subjects) == 3:
+def extract_safe_focus(subject: str) -> str:
+    base = strip_conventional_prefix(subject)
+    base = re.sub(r"[^\w\s-]", " ", base)
+    tokens = base.lower().split()
+    safe_tokens = []
+    for token in tokens:
+        if token in ACTION_VERBS or token in STOP_WORDS:
+            continue
+        if not re.match(r"^[a-z]+$", token):
+            continue
+        if len(token) < 3:
+            continue
+        safe_tokens.append(token)
+        if len(safe_tokens) == 4:
             break
-
-    for subject in recent_subjects:
-        if len(highlights) >= 6:
-            break
-        highlights.append(f"Delivered changes such as: {subject}.")
-
-    while len(highlights) < 4 and recent_subjects:
-        idx = len(highlights) % len(recent_subjects)
-        highlights.append(f"Delivered iterative improvements, including: {recent_subjects[idx]}.")
-
-    return highlights[:6]
+    return " ".join(safe_tokens)
 
 
-def build_summary(
-    role: str,
-    company: str,
-    time_label: str,
-    meaningful_count: int,
-    unique_file_count: int,
-    area_counts: Counter[str],
-    tech_counts: Counter[str],
-) -> str:
-    if meaningful_count == 0:
-        return (
-            f"As {role} at {company}, no meaningful commits were detected {time_label}; "
-            "widen the time range or adjust the author filter."
-        )
+def build_passive_line(action: str, focus: str) -> str:
+    focus_suffix = f" in {focus}" if focus else ""
+    if action == "issue-resolution":
+        return f"Issue resolution was completed{focus_suffix}."
+    if action == "performance":
+        return f"Performance optimization was completed{focus_suffix}."
+    if action == "security":
+        return f"Security and privacy hardening was completed{focus_suffix}."
+    if action == "integration":
+        return f"Integration enablement was completed{focus_suffix}."
+    if action == "maintainability":
+        return f"Maintainability improvements were completed{focus_suffix}."
+    return f"Feature delivery was completed{focus_suffix}."
 
-    top_area = area_counts.most_common(1)[0][0] if area_counts else "core project areas"
-    top_tech = tech_counts.most_common(1)[0][0] if tech_counts else "multiple technologies"
-    commit_word = pluralize(meaningful_count, "commit")
-    file_word = pluralize(unique_file_count, "file")
+
+def unique_preserve_order(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def build_time_label(since: str | None, until: str | None) -> str:
+    if not since and not until:
+        return "across the full period"
+    if since and until:
+        return f"between {since} and {until}"
+    if since:
+        return f"from {since} onward"
+    return f"up to {until}"
+
+
+def build_summary(role: str, company: str, time_label: str) -> str:
     return (
-        f"As {role} at {company}, shipped {meaningful_count} meaningful {commit_word} {time_label}, "
-        f"touching {unique_file_count} {file_word} with notable focus on {top_area} and {top_tech}."
+        f"In the role of {role} at {company}, commit-message-driven feature highlights were generated "
+        f"{time_label} with confidentiality-safe language for LinkedIn."
     )
+
+
+def build_feature_highlights(commits: list[dict[str, str]]) -> list[str]:
+    lines = []
+    for commit in commits:
+        action = classify_action(commit["subject"])
+        focus = extract_safe_focus(commit["subject"])
+        lines.append(build_passive_line(action, focus))
+        if len(lines) == 6:
+            break
+    if not lines:
+        lines = [
+            "Feature delivery was completed in customer-facing workflows.",
+            "Execution was aligned with business-critical workflows.",
+            "User-facing experience quality was improved in core journeys.",
+            "Production-readiness expectations were met in delivered work.",
+        ]
+    return unique_preserve_order(lines)[:6]
+
+
+def build_end_user_outcomes(commits: list[dict[str, str]]) -> list[str]:
+    actions = [classify_action(c["subject"]) for c in commits[:12]]
+    lines = []
+    if "issue-resolution" in actions:
+        lines.append("User-facing disruptions were reduced in critical journeys.")
+    if "performance" in actions:
+        lines.append("Waiting time was reduced in key user interactions.")
+    if "security" in actions:
+        lines.append("User trust was reinforced through stronger protection behaviors.")
+    if "integration" in actions:
+        lines.append("Cross-workflow usability was improved in connected user journeys.")
+    lines.extend(
+        [
+            "Everyday usability was improved in core user flows.",
+            "Consistency was increased in customer-facing product behavior.",
+        ]
+    )
+    return unique_preserve_order(lines)[:4]
+
+
+def build_business_relevance(commits: list[dict[str, str]]) -> list[str]:
+    actions = [classify_action(c["subject"]) for c in commits[:12]]
+    lines = []
+    if "issue-resolution" in actions:
+        lines.append("Core business workflows were protected from avoidable service degradation.")
+    if "performance" in actions:
+        lines.append("Scalability readiness was improved in peak usage paths.")
+    if "security" in actions:
+        lines.append("Compliance and reputational risk were reduced in sensitive workflows.")
+    if "integration" in actions:
+        lines.append("Integration readiness was improved for partner-facing use cases.")
+    lines.extend(
+        [
+            "Execution was aligned with business-critical workflows.",
+            "Delivery quality was improved for customer-impacting priorities.",
+        ]
+    )
+    return unique_preserve_order(lines)[:4]
 
 
 def write_markdown_output(path: str, data: dict[str, Any]) -> None:
@@ -264,43 +317,35 @@ def write_markdown_output(path: str, data: dict[str, Any]) -> None:
         "",
         f"- Role: {data['role']}",
         f"- Company: {data['company']}",
-        f"- Author filter: {data['author']}",
         f"- Time mode: {data['time_range']['mode']}",
         "",
         "## Summary",
         "",
         data["summary"],
         "",
-        "## Highlights",
+        "## Feature Highlights",
         "",
     ]
+    lines.extend([f"- {item}" for item in data["feature_highlights"]])
 
-    highlights = data.get("highlights", [])
-    if highlights:
-        lines.extend([f"- {item}" for item in highlights])
-    else:
-        lines.append("- No meaningful commit highlights were detected.")
+    lines.extend(["", "## End-User Outcomes", ""])
+    lines.extend([f"- {item}" for item in data["end_user_outcomes"]])
 
-    guidance = data.get("guidance")
-    if guidance:
-        lines.extend(["", "## Guidance", "", guidance])
+    lines.extend(["", "## Business Relevance", ""])
+    lines.extend([f"- {item}" for item in data["business_relevance"]])
+
+    if data.get("guidance"):
+        lines.extend(["", "## Guidance", "", data["guidance"]])
 
     output_path.write_text("\n".join(lines) + "\n")
 
 
-def build_time_label(since: str | None, until: str | None) -> str:
-    if not since and not until:
-        return "across the repository's full history"
-    if since and until:
-        return f"between {since} and {until}"
-    if since:
-        return f"from {since} onward"
-    return f"up to {until}"
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract git history signals for LinkedIn Experience drafting."
+        description=(
+            "Extract feature-oriented and confidentiality-safe LinkedIn experience content "
+            "directly from commit messages."
+        )
     )
     parser.add_argument("--repo", default=".", help="Repository path (default: current directory)")
     parser.add_argument("--role", required=True, help="LinkedIn role title")
@@ -334,10 +379,9 @@ def main() -> None:
         "log",
         "--no-merges",
         "--date=short",
-        "--numstat",
         f"--max-count={args.max_commits}",
         f"--author={author}",
-        "--pretty=format:__COMMIT__%x1f%H%x1f%ad%x1f%s%x1f%b",
+        "--pretty=format:__COMMIT__%x1f%ad%x1f%s%x1f%b",
     ]
     if args.since:
         log_args.append(f"--since={args.since}")
@@ -348,102 +392,41 @@ def main() -> None:
     commits = parse_log(raw_log)
     meaningful_commits = [c for c in commits if not is_low_signal_subject(c["subject"])]
 
-    unique_files: set[str] = set()
-    area_counts: Counter[str] = Counter()
-    tech_counts: Counter[str] = Counter()
-    total_insertions = 0
-    total_deletions = 0
-
-    for commit in meaningful_commits:
-        total_insertions += commit["insertions"]
-        total_deletions += commit["deletions"]
-        for file_path in commit["files"]:
-            unique_files.add(file_path)
-            area_counts[infer_area(file_path)] += 1
-            ext = infer_extension(file_path)
-            tech = EXTENSION_TO_TECH.get(ext)
-            if tech:
-                tech_counts[tech] += 1
-
     time_mode = "all-time" if not args.since and not args.until else "bounded"
     time_label = build_time_label(args.since, args.until)
-    summary = build_summary(
-        role=args.role,
-        company=args.company,
-        time_label=time_label,
-        meaningful_count=len(meaningful_commits),
-        unique_file_count=len(unique_files),
-        area_counts=area_counts,
-        tech_counts=tech_counts,
-    )
-    highlights = build_highlights(
-        meaningful_commits=meaningful_commits,
-        unique_files=unique_files,
-        area_counts=area_counts,
-        tech_counts=tech_counts,
-        total_insertions=total_insertions,
-        total_deletions=total_deletions,
-    )
+    summary = build_summary(args.role, args.company, time_label)
+
+    feature_highlights = build_feature_highlights(meaningful_commits)
+    end_user_outcomes = build_end_user_outcomes(meaningful_commits)
+    business_relevance = build_business_relevance(meaningful_commits)
 
     guidance = None
     if not commits:
         guidance = "No commits found in this range. Widen the date range or verify the author filter."
     elif not meaningful_commits:
         guidance = (
-            "Commits were found but all were filtered as low-signal. "
-            "Adjust commit naming or lower filtering strictness."
+            "Commits were found but they were too low-signal for feature extraction. "
+            "Try a different date range or review commit message quality."
         )
 
     result = {
-        "repo": repo_path,
         "role": args.role,
         "company": args.company,
-        "author": author,
         "time_range": {
             "mode": time_mode,
             "since": args.since,
             "until": args.until,
         },
-        "filters": {
-            "max_commits": args.max_commits,
-            "low_signal_filter": True,
-            "low_signal_patterns": [
-                "chore",
-                "wip",
-                "bump",
-                "release",
-                "typo",
-                "format",
-                "lint",
-                "docs",
-            ],
-        },
-        "stats": {
-            "raw_commits": len(commits),
-            "meaningful_commits": len(meaningful_commits),
-            "unique_files_touched": len(unique_files),
-            "areas_touched": len(area_counts),
-            "insertions": total_insertions,
-            "deletions": total_deletions,
-        },
-        "areas": [
-            {"name": name, "changes": count}
-            for name, count in area_counts.most_common(10)
-        ],
-        "tech_signals": [
-            {"name": name, "changes": count}
-            for name, count in tech_counts.most_common(10)
-        ],
-        "recent_meaningful_commits": [
-            {
-                "hash": commit["hash"][:7],
-                "date": commit["date"],
-                "subject": commit["subject"],
-            }
-            for commit in meaningful_commits[:10]
-        ],
         "summary": summary,
-        "highlights": highlights,
+        "feature_highlights": feature_highlights,
+        "end_user_outcomes": end_user_outcomes,
+        "business_relevance": business_relevance,
+        "source_mode": "direct-commit-messages",
+        "confidentiality": {
+            "includes_repository_statistics": False,
+            "includes_commit_hashes_or_file_paths": False,
+            "includes_raw_commit_messages": False,
+        },
         "guidance": guidance,
     }
 
